@@ -72,7 +72,7 @@ zskiplist *zslCreate(void) {
 
 	// 申请内存
     zsl = zmalloc(sizeof(*zsl));
-	// 初始化跳跃表属性
+	// 初始化跳跃表属性,层数初始化为1，长度初始化为0
     zsl->level = 1;
     zsl->length = 0;
 
@@ -112,16 +112,33 @@ void zslFree(zskiplist *zsl) {
  * levels are less likely to be returned. */
 int zslRandomLevel(void) {
     int level = 1;
+	//random函数返回一个0~num-1之间的随机数
     while ((random()&0xFFFF) < (ZSKIPLIST_P * 0xFFFF))
         level += 1;
     return (level<ZSKIPLIST_MAXLEVEL) ? level : ZSKIPLIST_MAXLEVEL;
 }
 
+
+/*****************************************************************************
+ * 函 数 名  : zslInsert
+ * 函数功能  : 插入新节点
+ * 输入参数  : zskiplist *zsl  表头
+               double score    节点分数
+               robj *obj       待插入节点分数
+ * 输出参数  : 无
+ * 返 回 值  : zskiplistNode
+ * 调用关系  : 
+ * 记    录
+ * 1.日    期: 2017年06月13日
+ *   作    者: zyz
+ *   修改内容: 新生成函数
+*****************************************************************************/
 zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
 	// updata[]数组记录每一层位于插入节点的前一个节点
     zskiplistNode *update[ZSKIPLIST_MAXLEVEL], *x;
 	
 	// rank[]记录每一层位于插入节点的前一个节点的排名
+	//在查找某个节点的过程中，将沿途访问过的所有层的跨度累计起来，得到的结果就是目标节点在跳跃表中的排位
     unsigned int rank[ZSKIPLIST_MAXLEVEL];
 	
     int i, level;
@@ -130,24 +147,32 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
 	// 表头节点
     x = zsl->header;
 	
-	// 从最高层开始查找
+	// 从最高层开始查找(最高层节点少，跳越快)
     for (i = zsl->level-1; i >= 0; i--) {
         /* store rank that is crossed to reach the insert position */
 
-		 // 存储rank值是为了交叉快速地到达插入位置
+		
+
+        //rank[i]用来记录第i层达到插入位置的所跨越的节点总数,也就是该层最接近(小于)给定score的排名  
+        //rank[i]初始化为上一层所跨越的节点总数,因为上一层已经加过
         rank[i] = i == (zsl->level-1) ? 0 : rank[i+1];
 
-	    // 前向指针不为空，前置指针的分值小于score或当前向指针的分值等于空但成员对象不等于o的情况下，继续向前查找
+	    //后继节点不为空，并且后继节点的score比给定的score小  
         while (x->level[i].forward &&
             (x->level[i].forward->score < score ||
+             	//score相同，但节点的obj比给定的obj小  
                 (x->level[i].forward->score == score &&
                 compareStringObjects(x->level[i].forward->obj,obj) < 0))) {
+            //记录跨越了多少个节点  
             rank[i] += x->level[i].span;
+			
+			//查找下一个节点
             x = x->level[i].forward;
         }
-		// 存储当前层上位于插入节点的前一个节点
+		// 存储当前层上位于插入节点的前一个节点,找下一层的插入节点
         update[i] = x;
     }
+	
     /* we assume the key is not already inside, since we allow duplicated
      * scores, and the re-insertion of score and redis object should never
      * happen since the caller of zslInsert() should test in the hash table
@@ -156,16 +181,24 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
 	// 此处假设插入节点的成员对象不存在于当前跳跃表内，即不存在重复的节点
     // 随机生成一个level值
     level = zslRandomLevel();
+
+
+	// 如果level大于当前存储的最大level值
+	// 设定rank数组中大于原level层以上的值为0--为什么设置为0
+	// 同时设定update数组大于原level层以上的数据
     if (level > zsl->level) {
-        // 如果level大于当前存储的最大level值
-        // 设定rank数组中大于原level层以上的值为0
-        // 同时设定update数组大于原level层以上的数据
+
         for (i = zsl->level; i < level; i++) {
+
+			//因为这一层没有节点，所以重置rank[i]为0
             rank[i] = 0;
+			//因为这一层还没有节点，所以节点的前一个节点都是头节点
             update[i] = zsl->header;
+		
+			//在未添加新节点之前，需要更新的节点跨越的节点数目自然就是zsl->length---因为整个层只有一个头结点----->言外之意头结点的span都是链表长度
             update[i]->level[i].span = zsl->length;
         }
-		// 更新level值
+		// 更新level值（max层数）
         zsl->level = level;
     }
 
@@ -173,35 +206,64 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
     x = zslCreateNode(level,score,obj);
     for (i = 0; i < level; i++) {
 
-	  // 针对跳跃表的每一层，改变其forward指针的指向
+		// 针对跳跃表的每一层，改变其forward指针的指向
         x->level[i].forward = update[i]->level[i].forward;
+
+		 //插入位置节点的后继就是新节点  
         update[i]->level[i].forward = x;
 
         /* update span covered by update[i] as x is inserted here */
 
-		// 更新插入节点的span值
+		//rank[i]: 在第i层，update[i]->score的排名 
+		//rank[0] - rank[i]: update[0]->score与update[i]->score之间间隔了几个数
+
+		// A3 ----------------------------- [I] -> F3
+		// A2 ----------------> D2 -------- [I] -> F2
+		// A1 ---------> C1 --> D1 -------- [I] -> F1
+		// A0 --> B0 --> C0 --> D0 --> E0 - [I] -> F0
+		
+		//x->level[i].span = 从x到update[i]->forword的span数目， 
+		//原来的update[i]->level[i].span = 从update[i]到update[i]->level[i]->forward的span数目 
+		//所以x->level[i].span = 原来的update[i]->level[i].span - (rank[0] - rank[i]); 
         x->level[i].span = update[i]->level[i].span - (rank[0] - rank[i]);
 
-		 // 更新插入点的前一个节点的span值
+
+		//对于update[i]->level[i].span值的更新由于在update[i]与update[i]->level[i]->forward之间又添加了x， 
+		//update[i]->level[i].span = 从update[i]到x的span数目， 
+		//由于update[0]后面肯定是新添加的x，所以自然新的update[i]->level[i].span = (rank[0] - rank[i]) + 1; 
+
+		//提示： update[i]和x[i]之间肯定没有节点了
         update[i]->level[i].span = (rank[0] - rank[i]) + 1;
     }
+
+
+	//
+	//另外需要注意当level > zsl->level时，update[i] = zsl->header的span处理 
+
 
     /* increment span for untouched levels */
 
 	// 更新高层的span值
     for (i = level; i < zsl->level; i++) {
+		//因为下层中间插入了x，而高层没有，所以多了一个跨度
         update[i]->level[i].span++;
     }
 
 	// 设定插入节点的backward指针
+	//如果插入节点的前一个节点都是头节点，则插入节点的后向指针为NULL？  
     x->backward = (update[0] == zsl->header) ? NULL : update[0];
+
+	//如果插入节点的0层存前向节点则前向节点的后向指针为插入节点
     if (x->level[0].forward)
         x->level[0].forward->backward = x;
     else
+	//否则该节点为跳跃表的尾节点
         zsl->tail = x;
 
 	// 跳跃表长度+1
     zsl->length++;
+
+	//返回插入的节点
     return x;
 }
 
@@ -227,6 +289,21 @@ void zslDeleteNode(zskiplist *zsl, zskiplistNode *x, zskiplistNode **update) {
 }
 
 /* Delete an element with matching score/object from the skiplist. */
+
+/*****************************************************************************
+ * 函 数 名  : zslDelete
+ * 函数功能  : 删除匹配的节点
+ * 输入参数  : zskiplist *zsl  表头指针
+               double score    节点分数
+               robj *obj       节点数据指针
+ * 输出参数  : 无
+ * 返 回 值  : 
+ * 调用关系  : 
+ * 记    录
+ * 1.日    期: 2017年06月13日
+ *   作    者: zyz
+ *   修改内容: 新生成函数
+*****************************************************************************/
 int zslDelete(zskiplist *zsl, double score, robj *obj) {
     zskiplistNode *update[ZSKIPLIST_MAXLEVEL], *x;
     int i;
