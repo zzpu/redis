@@ -268,23 +268,45 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
 }
 
 /* Internal function used by zslDelete, zslDeleteByScore and zslDeleteByRank */
+/*****************************************************************************
+ * 函 数 名  : zslDeleteNode
+ * 函数功能  : 内置功能函数，被zslDelete等函数调用
+ * 输入参数  : zskiplist *zsl          链表头指针
+               zskiplistNode *x        待删除节点指针
+               zskiplistNode **update  带删除节点的前一节点地址的指针
+ * 输出参数  : 无
+ * 返 回 值  : 
+ * 调用关系  : 
+ * 记    录
+ * 1.日    期: 2017年06月24日
+ *   作    者: zyz
+ *   修改内容: 新生成函数
+*****************************************************************************/
 void zslDeleteNode(zskiplist *zsl, zskiplistNode *x, zskiplistNode **update) {
     int i;
     for (i = 0; i < zsl->level; i++) {
+        //如果待更新节点（待删除节点的前一节点）的前向节点是待删除节点，则需要处理待更新节点的前向指针
         if (update[i]->level[i].forward == x) {
             update[i]->level[i].span += x->level[i].span - 1;
+            
+            //这里有可能为NULL，比如删除最后一个节点
             update[i]->level[i].forward = x->level[i].forward;
+        //否则只要跨度减一即可
         } else {
             update[i]->level[i].span -= 1;
         }
     }
+    //处理待删除节点的后一节点（如果存在的话）
     if (x->level[0].forward) {
         x->level[0].forward->backward = x->backward;
     } else {
         zsl->tail = x->backward;
     }
+    //跳跃表的层数处理，如果表头层级的前向指针为空，说明这一层已经没有元素，层数要减一
     while(zsl->level > 1 && zsl->header->level[zsl->level-1].forward == NULL)
         zsl->level--;
+    
+    //跳跃表长度减一
     zsl->length--;
 }
 
@@ -292,7 +314,7 @@ void zslDeleteNode(zskiplist *zsl, zskiplistNode *x, zskiplistNode **update) {
 
 /*****************************************************************************
  * 函 数 名  : zslDelete
- * 函数功能  : 删除匹配的节点
+ * 函数功能  : 根据给定分值和成员来删除节点
  * 输入参数  : zskiplist *zsl  表头指针
                double score    节点分数
                robj *obj       节点数据指针
@@ -309,17 +331,22 @@ int zslDelete(zskiplist *zsl, double score, robj *obj) {
     int i;
 
     x = zsl->header;
+    // 遍历所有层，记录删除节点后需要被修改的节点到 update 数组  
     for (i = zsl->level-1; i >= 0; i--) {
-        while (x->level[i].forward &&
-            (x->level[i].forward->score < score ||
-                (x->level[i].forward->score == score &&
-                compareStringObjects(x->level[i].forward->obj,obj) < 0)))
+        //指针前移首要条件是前向节点指针不为空，次要条件是分数小于指定分数，或即使分数相等，节点成员对象也不相等------> 前向指针前移的必要条件：分数小于或等于指定分数
+        while (x->level[i].forward && //前向指针不为空
+            (x->level[i].forward->score < score || //前向节点分数小于指定分数
+                (x->level[i].forward->score == score &&  //前向节点分数等于指定分数
+                compareStringObjects(x->level[i].forward->obj,obj) < 0)))//前向节点成员对象不相同
             x = x->level[i].forward;
+        //保存待删除节点的前一节点指针
         update[i] = x;
     }
-    /* We may have multiple elements with the same score, what we need
-     * is to find the element with both the right score and object. */
+    // 因为多个不同的 member 可能有相同的 score  
+    // 所以要确保 x 的 member 和 score 都匹配时，才进行删除  
+
     x = x->level[0].forward;
+
     if (x && score == x->score && equalStringObjects(x->obj,obj)) {
         zslDeleteNode(zsl, x, update);
         zslFreeNode(x);
@@ -408,6 +435,20 @@ zskiplistNode *zslLastInRange(zskiplist *zsl, zrangespec *range) {
  * Min and max are inclusive, so a score >= min || score <= max is deleted.
  * Note that this function takes the reference to the hash table view of the
  * sorted set, in order to remove the elements from the hash table too. */
+/*****************************************************************************
+ * 函 数 名  : zslDeleteRangeByScore
+ * 函数功能  : 根据给定分值来删除节点
+ * 输入参数  : zskiplist *zsl     表头指针
+               zrangespec *range  节点分数范围
+               dict *dict         ？
+ * 输出参数  : 无
+ * 返 回 值  : unsigned
+ * 调用关系  : 
+ * 记    录
+ * 1.日    期: 2017年06月24日
+ *   作    者: zyz
+ *   修改内容: 新生成函数
+*****************************************************************************/
 unsigned long zslDeleteRangeByScore(zskiplist *zsl, zrangespec *range, dict *dict) {
     zskiplistNode *update[ZSKIPLIST_MAXLEVEL], *x;
     unsigned long removed = 0;

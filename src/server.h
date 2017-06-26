@@ -659,7 +659,7 @@ typedef struct zskiplistNode {
     struct zskiplistLevel {
 		// 前进指针
         struct zskiplistNode *forward;
-		// 这个层跨越的节点数量
+		// 这个层跨越的节点数量（节点在该层和前向节点的距离）
         unsigned int span;
     } level[];
 } zskiplistNode;
